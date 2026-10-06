@@ -483,13 +483,18 @@ class AntivirusApp(ctk.CTk):
     # =========================
 
     def security_audit(self):
-        self.set_status("Running security audit...")
+        self.status_text("Running security audit...")
         self.show("")
 
         try:
             audit = run_security_audit()
             score = audit["score"]
             checks = audit["checks"]
+
+            self.score_stat.configure(text=f"{score}/100")
+
+
+            self.score_stat.configure(text=f"{score}/100")
 
             level = (
                 "EXCELLENT" if score >= 90 else
@@ -519,11 +524,11 @@ class AntivirusApp(ctk.CTk):
                 f"FINAL SCORE: {score}/100\n"
             )
 
-            self.set_status(f"Security audit complete - {score}/100")
+            self.status_text(f"Security audit complete - {score}/100")
             logger.info("Security audit complete: %d/100", score)
 
         except Exception as exc:
-            self.set_status("Security audit failed")
+            self.status_text("Security audit failed")
             self.add(f"Security audit error: \n{exc}\n")
             logger.error("Security audit failed: %s", exc)
             messagebox.showerror("Security Audit Error", str(exc))        
