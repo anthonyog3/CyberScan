@@ -10,6 +10,7 @@ import customtkinter as ctk
 
 from core.scanner import scan_path
 from core.quarantine import quarantine_file
+from gui.quarantine_window import QuarantineWindow
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
@@ -47,6 +48,8 @@ class AntivirusApp(ctk.CTk):
         self.threats = {}          # normalized path -> result (HIGH / CRITICAL only)
         self.buttons = []
         self.busy = False
+
+        self._quarantine_window = None
 
         self._events = queue.Queue()   # worker -> UI thread
         self._progress = None          # latest (index, total) from the worker
@@ -136,6 +139,7 @@ class AntivirusApp(ctk.CTk):
         self.label(frame, "ACTIONS", 11).pack(padx=20, pady=(25, 10))
 
         self.add_button(frame, "Quarantine Selected", self.quarantine_selected)
+        self.add_button(frame, "Quarantine Manager", self.open_quarantine_manager)
 
         self.progress = ctk.CTkProgressBar(frame)
         self.progress.pack(fill="x", padx=20, pady=(25, 5))
@@ -641,13 +645,26 @@ class AntivirusApp(ctk.CTk):
             return
 
         try:
-            qid = quarantine_file(result, result.path, result.sha256)
+            qid = quarantine_file(result.path, result.sha256)
 
-            messagebox.showinfo("Quarantined", f"File quarantined.\n\nID: {qid}")
+            self.threats.pop(normalize(result.path), None)
+            self.threats_stat.configure(text=str(len(self.threats)))
+
+            messagebox.showinfo("Quarantined", f"File quarantined. \n\nID: {qid}")
             logger.warning("Quarantined %s as %s", result.path, qid)
 
         except Exception as exc:
             messagebox.showerror("Quarantine Error", str(exc))
+
+    def open_quarantine_manager(self):
+        window = self._quarantine_window
+
+        # Reuse the open window instead of stacking duplicates.
+        if window is not None and window.winfo_exists():
+            window.focus()
+            return
+
+        self._quarantine_window = QuarantineWindow(self)        
 
     # ---------- Security Audit ----------
 
