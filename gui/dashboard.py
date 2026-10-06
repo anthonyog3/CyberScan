@@ -1,42 +1,64 @@
-
 import json
+import os
+import queue
 import threading
 from datetime import datetime
 from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
 
-from core.scanner import scan_path, ScanResult
+from core.scanner import scan_path
 from core.quarantine import quarantine_file
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
 
 HISTORY = Path("database/scan_history.json")
-THREATS = {"HIGH", "CRITICAL"}
+HISTORY_LIMIT = 50
+
+THREATS = frozenset({"HIGH", "CRITICAL"})
+SAFE_RISKS = frozenset({"SAFE", "Secure"})
+NO_BADGE = frozenset({"INFO", ""})
+BAD_TAGS = THREATS | {"ERROR"}
+
+POLL_MS = 100        # how often the UI thread checks the worker
+INSERT_BATCH = 500   # tree rows inserted per UI tick
+
+
+def normalize(path):
+    """Normalize a path so dialog output and scanner output compare equal."""
+    return os.path.normcase(os.path.normpath(str(path)))
 
 
 class AntivirusApp(ctk.CTk):
     def __init__(self):
+        # Theme must be set before the window is created to avoid a re-style flash.
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
         super().__init__()
 
         self.title("CyberScan")
         self.geometry("1100x720")
         self.minsize(900, 620)
 
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-
-        self.results: list[ScanResult] = []
-        self.scanning = False
+        self.results = []
+        self.threats = {}          # normalized path -> result (HIGH / CRITICAL only)
         self.buttons = []
+        self.busy = False
+
+        self._events = queue.Queue()   # worker -> UI thread
+        self._progress = None          # latest (index, total) from the worker
+        self._shown_progress = None
+        self._render_job = None
+
+        self._row_data = {}            # tree iid -> ScanResult or details string
+        self._row_count = 0
 
         self.build_ui()
 
-    # =========================
-    # UI
-    # =========================
+    # ---------- UI ----------
 
     def build_ui(self):
         self.grid_columnconfigure(0, weight=1)
@@ -48,50 +70,23 @@ class AntivirusApp(ctk.CTk):
         self.build_main()
 
     def build_header(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=30, pady=(25, 5))
-        header.grid_columnconfigure(0, weight=1)
+        frame = ctk.CTkFrame(self, fg_color="transparent")
+        frame.grid(row=0, column=0, sticky="ew", padx=30, pady=(25, 5))
+
+        self.label(frame, "CyberScan", 30).pack(side="left")
 
         ctk.CTkLabel(
-            header,
-            text="CyberScan",
-            font=ctk.CTkFont(size=32, weight="bold")
-        ).grid(row=0, column=0, sticky="w")
-
-        ctk.CTkLabel(
-            header,
-            text="Windows Security & Malware Protection"
-        ).grid(row=1, column=0, sticky="w")
-
-        self.protection = ctk.CTkLabel(
-            header,
-            text="● PROTECTION READY",
-            text_color="#4ade80",
-            font=ctk.CTkFont(size=14, weight="bold")
-        )
-        self.protection.grid(row=0, column=1, rowspan=2)
+            frame,
+            text="Windows Security Center",
+            font=ctk.CTkFont(size=13)
+        ).pack(side="left", padx=15, pady=(8, 0))
 
     def build_status(self):
         frame = ctk.CTkFrame(self, corner_radius=12)
-        frame.grid(row=1, column=0, sticky="ew", padx=30, pady=15)
-        frame.grid_columnconfigure(0, weight=1)
+        frame.grid(row=1, column=0, sticky="ew", padx=30, pady=10)
 
-        self.status = ctk.CTkLabel(
-            frame,
-            text="Your system is ready to scan",
-            font=ctk.CTkFont(size=17, weight="bold")
-        )
-        self.status.grid(row=0, column=0, sticky="w", padx=20, pady=(15, 3))
-
-        self.progress = ctk.CTkProgressBar(frame)
-        self.progress.grid(row=1, column=0, sticky="ew", padx=20, pady=5)
-        self.progress.set(0)
-
-        self.progress_text = ctk.CTkLabel(
-            frame,
-            text="Ready"
-        )
-        self.progress_text.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 15))
+        self.status_label = self.label(frame, "●  System ready", 14)
+        self.status_label.pack(side="left", padx=20, pady=14)
 
     def build_stats(self):
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -108,17 +103,9 @@ class AntivirusApp(ctk.CTk):
         card = ctk.CTkFrame(parent, corner_radius=12)
         card.grid(row=0, column=column, sticky="ew", padx=5)
 
-        ctk.CTkLabel(
-            card,
-            text=title,
-            font=ctk.CTkFont(size=11, weight="bold")
-        ).pack(pady=(12, 2))
+        self.label(card, title, 11).pack(pady=(12, 2))
 
-        label = ctk.CTkLabel(
-            card,
-            text=value,
-            font=ctk.CTkFont(size=24, weight="bold")
-        )
+        label = self.label(card, value, 24)
         label.pack(pady=(0, 12))
 
         return label
@@ -134,112 +121,328 @@ class AntivirusApp(ctk.CTk):
         self.build_results(frame)
 
     def build_controls(self, parent):
-        controls = ctk.CTkFrame(parent, corner_radius=12)
-        controls.grid(row=0, column=0, sticky="ns", padx=(0, 15))
+        frame = ctk.CTkFrame(parent, corner_radius=12)
+        frame.grid(row=0, column=0, sticky="ns")
 
-        ctk.CTkLabel(
-            controls,
-            text="SCAN CENTER",
-            font=ctk.CTkFont(size=13, weight="bold")
-        ).pack(pady=(20, 15))
+        self.label(frame, "PROTECTION", 13).pack(padx=20, pady=(20, 15))
 
-        for text, command, width in [
-            ("Quick Scan", self.quick_scan, 190),
-            ("Custom Scan", self.custom_scan, 190),
-            ("Security Audit", self.security_audit, 190),
-            ("Quarantine Selected", self.quarantine_selected, 190)
-        ]:
-            button = ctk.CTkButton(
-                controls,
-                text=text,
-                width=width,
-                height=42,
-                command=command
-            )
-            button.pack(padx=20, pady=6)
-            self.buttons.append(button)
+        for text, command in (
+            ("Quick Scan", self.quick_scan),
+            ("Custom Scan", self.custom_scan),
+            ("Security Audit", self.security_audit),
+        ):
+            self.add_button(frame, text, command)
 
-        ctk.CTkLabel(
-            controls,
-            text="THREAT SELECTION",
-            font=ctk.CTkFont(size=12, weight="bold")
-        ).pack(pady=(25, 8))
+        self.label(frame, "ACTIONS", 11).pack(padx=20, pady=(25, 10))
 
-        self.threats = ctk.CTkComboBox(
-            controls,
-            values=["No threats detected"],
-            width=190
+        self.add_button(frame, "Quarantine Selected", self.quarantine_selected)
+
+        self.progress = ctk.CTkProgressBar(frame)
+        self.progress.pack(fill="x", padx=20, pady=(25, 5))
+        self.progress.set(0)
+
+    @staticmethod
+    def label(parent, text, size):
+        return ctk.CTkLabel(
+            parent,
+            text=text,
+            font=ctk.CTkFont(size=size, weight="bold")
         )
-        self.threats.pack(padx=20, pady=(0, 20))
+
+    def add_button(self, parent, text, command):
+        button = ctk.CTkButton(
+            parent,
+            text=text,
+            width=190,
+            height=40,
+            command=command
+        )
+        button.pack(padx=20, pady=5)
+        self.buttons.append(button)
 
     def build_results(self, parent):
         frame = ctk.CTkFrame(parent, corner_radius=12)
-        frame.grid(row=0, column=1, sticky="nsew")
+        frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            frame,
-            text="SCAN RESULTS",
-            font=ctk.CTkFont(size=13, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=20, pady=18)
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=15)
 
-        self.output = ctk.CTkTextbox(
+        self.label(header, "SCAN RESULTS", 15).pack(side="left")
+
+        self.results_status = ctk.CTkLabel(header, text="Ready")
+        self.results_status.pack(side="right")
+
+        # Row 1: either the results tree or the "System ready" placeholder.
+        self.build_tree(frame)
+        self.build_empty_state(frame)
+
+        # Row 2: full details of the selected row.
+        self.details_box = ctk.CTkTextbox(
             frame,
+            height=130,
+            corner_radius=8,
             wrap="word",
-            font=("Consolas", 12),
-            corner_radius=8
+            state="disabled"
         )
-        self.output.grid(
-            row=1,
+        self.details_box.grid(
+            row=2,
             column=0,
-            sticky="nsew",
+            sticky="ew",
             padx=15,
             pady=(0, 15)
         )
 
-        self.show(
-            "============================================\n"
-            "              CYBERSCAN\n"
-            "        SECURITY PROTECTION CENTER\n"
-            "============================================\n\n"
-            "System ready.\n\n"
-            "Choose a scan from the left to begin."
+        self.empty_results()
+
+    def build_tree(self, parent):
+        """A Treeview only draws visible rows, so it stays fast with 100k+ results
+        (the old one-widget-per-result list froze and crashed on large scans)."""
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(
+            "Results.Treeview",
+            background="#2b2b2b",
+            fieldbackground="#2b2b2b",
+            foreground="#e6e6e6",
+            rowheight=30,
+            borderwidth=0
+        )
+        style.map(
+            "Results.Treeview",
+            background=[("selected", "#1f6aa5")],
+            foreground=[("selected", "#ffffff")]
+        )
+        style.configure(
+            "Results.Treeview.Heading",
+            background="#333333",
+            foreground="#e6e6e6",
+            relief="flat",
+            font=("Segoe UI", 10, "bold")
+        )
+        style.map(
+            "Results.Treeview.Heading",
+            background=[("active", "#3d3d3d")]
         )
 
-    # =========================
-    # Helpers
-    # =========================
+        self.tree_frame = ctk.CTkFrame(parent, corner_radius=8)
+        self.tree_frame.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=15,
+            pady=(0, 10)
+        )
+        self.tree_frame.grid_columnconfigure(0, weight=1)
+        self.tree_frame.grid_rowconfigure(0, weight=1)
 
-    def show(self, text):
-        self.output.delete("1.0", "end")
-        self.output.insert("end", text)
-        self.output.see("end")
+        self.tree = ttk.Treeview(
+            self.tree_frame,
+            columns=("risk", "name", "summary"),
+            show="headings",
+            selectmode="browse",
+            style="Results.Treeview"
+        )
+        self.tree.heading("risk", text="RISK")
+        self.tree.heading("name", text="NAME")
+        self.tree.heading("summary", text="DETAILS")
+        self.tree.column("risk", width=90, minwidth=70, stretch=False)
+        self.tree.column("name", width=240, minwidth=120, stretch=False)
+        self.tree.column("summary", width=400, minwidth=150, stretch=True)
+
+        self.tree.tag_configure("bad", foreground="#ff6b6b")
+        self.tree.tag_configure("good", foreground="#5fd38d")
+        self.tree.tag_configure("warn", foreground="#f5c542")
+
+        scrollbar = ctk.CTkScrollbar(
+            self.tree_frame,
+            command=self.tree.yview
+        )
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=4)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=4)
+
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+    def build_empty_state(self, parent):
+        self.empty_frame = ctk.CTkFrame(parent, corner_radius=8)
+        self.empty_frame.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=15,
+            pady=(0, 10)
+        )
+
+        ctk.CTkLabel(
+            self.empty_frame,
+            text="✓",
+            font=ctk.CTkFont(size=42, weight="bold")
+        ).pack(pady=(70, 5))
+
+        self.label(self.empty_frame, "System ready", 18).pack()
+
+        ctk.CTkLabel(
+            self.empty_frame,
+            text="Choose a scan from the left to begin."
+        ).pack(pady=5)
+
+    # ---------- Helpers ----------
+
+    def _show_empty(self, empty):
+        if empty:
+            self.tree_frame.grid_remove()
+            self.empty_frame.grid()
+        else:
+            self.empty_frame.grid_remove()
+            self.tree_frame.grid()
+
+    def clear_results(self):
+        self._cancel_render()
+
+        self.tree.delete(*self.tree.get_children())
+        self._row_data.clear()
+        self._row_count = 0
+
+        self.set_details("")
+        self._show_empty(False)
+
+    def empty_results(self):
+        self.clear_results()
+        self._show_empty(True)
+
+    def show(self, text=""):
+        self.clear_results()
+
+        if text:
+            self.result_card("INFO", text)
 
     def add(self, text):
-        self.output.insert("end", text)
-        self.output.see("end")
+        self.result_card("INFO", text)
 
     def status_text(self, text):
-        self.status.configure(text=text)
+        self.status_label.configure(text=f"●  {text}")
 
     def set_buttons(self, enabled):
         state = "normal" if enabled else "disabled"
+
         for button in self.buttons:
             button.configure(state=state)
 
-    # =========================
-    # Scanning
-    # =========================
+    def set_details(self, text):
+        self.details_box.configure(state="normal")
+        self.details_box.delete("1.0", "end")
+        self.details_box.insert("1.0", text)
+        self.details_box.configure(state="disabled")
+
+    @staticmethod
+    def risk_tag(risk):
+        if risk in BAD_TAGS:
+            return "bad"
+        if risk in SAFE_RISKS:
+            return "good"
+        if risk == "WARNING":
+            return "warn"
+        return ""
+
+    def add_row(self, risk, title, summary, data):
+        """Insert one row. `data` is a ScanResult or a details string, shown on select."""
+        if risk in THREATS:
+            icon = "⚠"
+        elif risk in SAFE_RISKS:
+            icon = "✓"
+        else:
+            icon = "●"
+
+        badge = "" if risk in NO_BADGE else risk
+        iid = str(self._row_count)
+        self._row_count += 1
+
+        self.tree.insert(
+            "",
+            "end",
+            iid=iid,
+            values=(badge, f"{icon}  {title}", summary),
+            tags=(self.risk_tag(risk),)
+        )
+        self._row_data[iid] = data
+
+    def result_card(self, risk, title, details=""):
+        """Add an info / audit / error row (details shown when selected)."""
+        summary = details.split("\n", 1)[0] if details else ""
+        self.add_row(risk, title, summary, details or title)
+
+    def on_select(self, _event=None):
+        selection = self.tree.selection()
+
+        if not selection:
+            return
+
+        data = self._row_data.get(selection[0])
+
+        if data is None:
+            return
+
+        self.set_details(
+            data if isinstance(data, str) else self.result_details(data)
+        )
+
+    # ---------- Background work ----------
+    #
+    # Worker threads never touch Tk. They only put results on a queue (or
+    # overwrite a "latest progress" value); the UI thread polls both.
+
+    def run_in_background(self, func, on_done, on_error):
+        self.busy = True
+        self.set_buttons(False)
+
+        def worker():
+            try:
+                self._events.put((on_done, func()))
+            except Exception as exc:
+                self._events.put((on_error, exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(POLL_MS, self._poll)
+
+    def _poll(self):
+        try:
+            handler, payload = self._events.get_nowait()
+        except queue.Empty:
+            self._show_progress()
+            self.after(POLL_MS, self._poll)
+            return
+
+        self.busy = False
+        self.set_buttons(True)
+        handler(payload)
+
+    def progress_callback(self, index, total, path, result):
+        # Runs on the worker thread: just record the latest value.
+        if index != "done":
+            self._progress = (index, total)
+
+    def _show_progress(self):
+        current = self._progress
+
+        if current is None or current == self._shown_progress:
+            return
+
+        self._shown_progress = current
+        index, total = current
+
+        self.progress.set(index / total if total else 0)
+        self.status_text(f"Scanning {index}/{total}")
+
+    # ---------- Scanning ----------
 
     def quick_scan(self):
         home = Path.home()
         targets = [
-            p for p in (
-                home / "Downloads",
-                home / "Desktop"
-            ) if p.exists()
+            p for p in (home / "Downloads", home / "Desktop") if p.exists()
         ]
 
         if not targets:
@@ -252,283 +455,251 @@ class AntivirusApp(ctk.CTk):
         self.start_scan(targets)
 
     def custom_scan(self):
-        folder = filedialog.askdirectory(
-            title="Choose a folder to scan"
-        )
+        target = filedialog.askdirectory(title="Choose a folder to scan")
 
-        if folder:
-            self.start_scan([Path(folder)])
+        if target:
+            self.start_scan([Path(target)])
 
     def start_scan(self, targets):
-        if self.scanning:
+        if self.busy:
             return
 
-        self.scanning = True
-        self.set_buttons(False)
+        self.results = []
+        self._progress = None
+        self._shown_progress = None
+
         self.progress.set(0)
-        self.progress_text.configure(text="Starting scan...")
-        self.status_text("Scanning your system...")
+        self.clear_results()
+        self.results_status.configure(text="Scanning...")
+        self.status_text("Scanning...")
 
-        self.protection.configure(
-            text="● SCAN IN PROGRESS",
-            text_color="#60a5fa"
-        )
+        def scan():
+            results = []
 
-        self.show("Scanning...\n\n")
+            for target in targets:
+                results.extend(
+                    scan_path(str(target), callback=self.progress_callback)
+                )
 
-        def worker():
-            try:
-                results = []
+            return results
 
-                for target in targets:
-                    results.extend(
-                        scan_path(
-                            str(target),
-                            callback=self.progress_callback
-                        )
-                    )
-
-                self.after(0, lambda: self.finish_scan(results))
-
-            except Exception as exc:
-                self.after(0, lambda: self.scan_error(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def progress_callback(self, index, total, path, result):
-        if index == "done":
-            return
-
-        progress = index / total if total else 0
-
-        self.after(
-            0,
-            lambda: self.update_progress(
-                progress, index, total, path
-            )
-        )
-
-    def update_progress(self, progress, index, total, path):
-        self.progress.set(progress)
-        self.progress_text.configure(
-            text=f"{index}/{total} • {Path(str(path)).name}"
-        )
-        self.status_text(
-            f"Scanning file {index} of {total}"
-        )
+        self.run_in_background(scan, self.finish_scan, self.scan_error)
 
     def finish_scan(self, results):
-        self.scanning = False
-        self.set_buttons(True)
-        self.progress.set(1)
-        self.progress_text.configure(text="Scan complete")
-
         self.results = results
-        threats = [r for r in results if r.risk in THREATS]
+        self.threats = {
+            normalize(r.path): r for r in results if r.risk in THREATS
+        }
+        threat_count = len(self.threats)
 
         self.files_stat.configure(text=str(len(results)))
-        self.threats_stat.configure(text=str(len(threats)))
+        self.threats_stat.configure(text=str(threat_count))
+        self.results_status.configure(text=f"{threat_count} threats")
 
-        paths = [r.path for r in threats] or ["No threats detected"]
-        self.threats.configure(values=paths)
-        self.threats.set(paths[0])
-
-        self.protection.configure(
-            text="● PROTECTION READY",
-            text_color="#4ade80"
+        self.progress.set(1)
+        self.status_text(
+            f"{threat_count} threat(s) detected"
+            if threat_count
+            else "Scan complete - system looks safe"
         )
 
-        self.status_text("Scan completed successfully")
+        if not results:
+            self.empty_results()
+            return
 
-        self.show(
-            "============================================\n"
-            "             CYBERSCAN RESULTS\n"
-            "============================================\n\n"
-            f"Files scanned : {len(results)}\n"
-            f"Threats found : {len(threats)}\n\n"
-        )
-
-        if not threats:
-            self.add("✓ NO HIGH OR CRITICAL THREATS DETECTED\n\n")
-        else:
-            self.add("⚠ THREATS DETECTED\n\n")
-
-        for result in results:
-            self.add(f"[{result.risk}] {result.path}\n")
-
-            if result.sha256:
-                self.add(f"  SHA-256: {result.sha256}\n")
-
-            for reason in result.reasons:
-                self.add(f"  - {reason}\n")
-
-            if result.error:
-                self.add(f"  ERROR: {result.error}\n")
-
-            self.add("\n")
-
-        self.save_history(len(results), len(threats))
+        self.save_history(len(results), threat_count)
+        self.render_results(results)
 
         logger.info(
             "Scan complete: %d files, %d threats",
             len(results),
-            len(threats)
+            threat_count
         )
 
     def scan_error(self, exc):
-        self.scanning = False
-        self.set_buttons(True)
+        self.progress.set(0)
 
-        self.progress_text.configure(text="Scan failed")
         self.status_text("Scan failed")
+        self.results_status.configure(text="Error")
 
-        self.protection.configure(
-            text="● SCAN ERROR",
-            text_color="#f87171"
-        )
-
-        self.show(f"Scan error:\n\n{exc}")
+        self.clear_results()
+        self.result_card("ERROR", "Scan error", str(exc))
 
         logger.error("Scan failed: %s", exc)
 
-    # =========================
-    # History
-    # =========================
+    # ---------- Result rendering (batched) ----------
+
+    @staticmethod
+    def result_details(result):
+        details = [f"Path: {result.path}"]
+
+        if result.sha256:
+            details.append(f"SHA-256: {result.sha256}")
+
+        details.extend(f"• {reason}" for reason in result.reasons)
+
+        if result.error:
+            details.append(f"Error: {result.error}")
+
+        return "\n".join(details)
+
+    def render_results(self, results):
+        """Insert rows in batches so the window never stalls on huge scans."""
+        self.clear_results()
+        self._insert_batch(results, 0)
+
+    def _insert_batch(self, results, start):
+        end = min(start + INSERT_BATCH, len(results))
+
+        for result in results[start:end]:
+            self.add_row(
+                result.risk or "SAFE",
+                Path(result.path).name,
+                str(result.path),
+                result
+            )
+
+        self._render_job = (
+            self.after(1, self._insert_batch, results, end)
+            if end < len(results)
+            else None
+        )
+
+    def _cancel_render(self):
+        if self._render_job is not None:
+            self.after_cancel(self._render_job)
+            self._render_job = None
+
+    # ---------- History ----------
 
     def save_history(self, scanned, threats):
         try:
-            history = []
-
-            if HISTORY.exists():
-                history = json.loads(
-                    HISTORY.read_text(encoding="utf-8")
-                )
+            history = (
+                json.loads(HISTORY.read_text(encoding="utf-8"))
+                if HISTORY.exists()
+                else []
+            )
 
             history.append({
-                "timestamp": datetime.now().isoformat(
-                    timespec="seconds"
-                ),
+                "date": datetime.now().isoformat(timespec="seconds"),
                 "files_scanned": scanned,
                 "threats": threats
             })
 
             HISTORY.parent.mkdir(parents=True, exist_ok=True)
-
             HISTORY.write_text(
-                json.dumps(history[-50:], indent=2),
+                json.dumps(history[-HISTORY_LIMIT:], indent=2),
                 encoding="utf-8"
             )
 
         except Exception as exc:
             logger.error("Could not save history: %s", exc)
 
-    # =========================
-    # Quarantine
-    # =========================
+    # ---------- Quarantine ----------
+
+    def selected_threat(self):
+        """The threat currently selected in the results list, if any."""
+        for iid in self.tree.selection():
+            data = self._row_data.get(iid)
+
+            if data is not None and not isinstance(data, str):
+                return self.threats.get(normalize(data.path))
+
+        return None
 
     def quarantine_selected(self):
-        path = self.threats.get()
-
-        if path == "No threats detected":
-            messagebox.showinfo(
-                "Quarantine",
-                "No HIGH or CRITICAL results."
-            )
+        if not self.threats:
+            messagebox.showinfo("Quarantine", "No HIGH or CRITICAL results.")
             return
 
-        result = next(
-            (r for r in self.results if r.path == path),
-            None
-        )
+        result = self.selected_threat()
 
-        if not result:
-            messagebox.showerror(
-                "Quarantine",
-                "Threat could not be found."
-            )
-            return
+        if result is None:
+            if len(self.threats) == 1:
+                result = next(iter(self.threats.values()))
+            else:
+                path = filedialog.askopenfilename(
+                    title="Select threat to quarantine"
+                )
+
+                if not path:
+                    return
+
+                result = self.threats.get(normalize(path))
+
+                if not result:
+                    messagebox.showerror(
+                        "Quarantine",
+                        "Threat could not be found."
+                    )
+                    return
 
         if not messagebox.askyesno(
             "Quarantine",
-            f"Move this file to quarantine?\n\n{path}"
+            f"Move this file to quarantine?\n\n{result.path}"
         ):
             return
 
         try:
-            qid = quarantine_file(
-                result,
-                path,
-                result.sha256
-            )
+            qid = quarantine_file(result, result.path, result.sha256)
 
-            messagebox.showinfo(
-                "Quarantined",
-                f"File quarantined.\n\nID: {qid}"
-            )
-
-            logger.warning(
-                "Quarantined %s as %s",
-                path,
-                qid
-            )
+            messagebox.showinfo("Quarantined", f"File quarantined.\n\nID: {qid}")
+            logger.warning("Quarantined %s as %s", result.path, qid)
 
         except Exception as exc:
-            messagebox.showerror(
-                "Quarantine Error",
-                str(exc)
-            )
+            messagebox.showerror("Quarantine Error", str(exc))
 
-    # =========================
-    # Security Audit
-    # =========================
+    # ---------- Security Audit ----------
 
     def security_audit(self):
+        if self.busy:
+            return
+
         self.status_text("Running security audit...")
-        self.show("")
+        self.results_status.configure(text="Auditing...")
+        self.clear_results()
 
-        try:
-            audit = run_security_audit()
-            score = audit["score"]
-            checks = audit["checks"]
+        self.run_in_background(
+            run_security_audit,
+            self.finish_audit,
+            self.audit_error
+        )
 
-            self.score_stat.configure(text=f"{score}/100")
+    def finish_audit(self, audit):
+        score = audit["score"]
+        checks = audit["checks"]
 
+        level = (
+            "EXCELLENT" if score >= 90
+            else "GOOD" if score >= 75
+            else "WARNING" if score >= 50
+            else "CRITICAL"
+        )
 
-            self.score_stat.configure(text=f"{score}/100")
+        self.score_stat.configure(text=f"{score}/100")
+        self.files_stat.configure(text=str(len(checks)))
+        self.threats_stat.configure(text="0")
+        self.results_status.configure(text=level)
 
-            level = (
-                "EXCELLENT" if score >= 90 else
-                "GOOD" if score >= 75 else
-                "WARNING" if score>= 50 else
-                "CRITICAL"
+        self.result_card(
+            "INFO",
+            f"Security Score: {score}/100",
+            f"Overall security status: {level}"
+        )
+
+        for check in checks:
+            self.result_card(
+                check.get("status", "Unknown"),
+                check.get("name", "Unknown Check"),
+                f"Score: {check.get('score', 0)}/20\n{check.get('details', '')}"
             )
 
-            self.add(
-                "CYBERSCAN SECURITY AUDIT\n"
-                "========================\n\n"
-                f"Security Score: {score}/100\n"
-                f"Status: {level}\n\n"
-                "SECURITY CHECKS\n"
-                "------------------------"
-            )
+        self.status_text(f"Security audit complete - {score}/100")
+        logger.info("Security audit complete: %d/100", score)
 
-            for check in checks:
-                self.add(
-                    f"{check['name']}\n"
-                    f"Status: {check['score']}/20\n"
-                    f"{check['details']}\n\n"
-                )
+    def audit_error(self, exc):
+        self.status_text("Security audit failed")
+        self.results_status.configure(text="Error")
 
-            self.add(
-                "========================\n"
-                f"FINAL SCORE: {score}/100\n"
-            )
-
-            self.status_text(f"Security audit complete - {score}/100")
-            logger.info("Security audit complete: %d/100", score)
-
-        except Exception as exc:
-            self.status_text("Security audit failed")
-            self.add(f"Security audit error: \n{exc}\n")
-            logger.error("Security audit failed: %s", exc)
-            messagebox.showerror("Security Audit Error", str(exc))        
+        self.result_card("ERROR", "Security audit error", str(exc))
+        logger.error("Security audit failed: %s", exc)
