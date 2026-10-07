@@ -3,10 +3,14 @@
   "protected_folders": [
     "C:\\Users\\alexo\\Downloads"
   ],
-  "last_audit": null,
+  "last_audit": {
+    "score": 100,
+    "level": "EXCELLENT",
+    "date": "2026-10-07T16:07:55"
+  },
   "last audit": {
     "score": 100,
     "level": "EXCELLENT",
-    "date": "2026-10-07T13:59:20"
+    "date": "2026-10-07T14:07:36"
   }
 }

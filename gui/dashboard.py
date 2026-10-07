@@ -850,10 +850,9 @@ class AntivirusApp(ctk.CTk):
         self.score_stat.configure(text=f"{score}/100")
         self.files_stat.configure(text=str(len(checks)))
         self.threats_stat.configure(text="0")
-        self.results_status.configure(text=level)
 
         self.result_card(
-            "INFO",
+            "INFO"
             f"Security Score: {score}/100",
             f"Overall security status: {level}"
         )
@@ -868,7 +867,7 @@ class AntivirusApp(ctk.CTk):
         self.status_text(f"Security audit complete - {score}/100")
         logger.info("Security audit complete: %d/100", score)
 
-        self.settings["last audit"] = {
+        self.settings["last_audit"] = {
             "score": score,
             "level": level,
             "date": datetime.now() .isoformat(timespec="seconds")
