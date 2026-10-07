@@ -10,8 +10,9 @@ from utils.logger import logger
 class QuarantineWindow(ctk.CTkToplevel):
     """Pop-up window to review, restore, or permanently delete quarantined files."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, on_change=None):
         super().__init__(parent)
+        self.on_change = on_change
 
         self.title("Quarantine Manager")
         self.geometry("820x460")
@@ -29,6 +30,7 @@ class QuarantineWindow(ctk.CTkToplevel):
 
         self.refresh()
         self.after(150, self.focus)  # CTkToplevel can open behind the main window
+
 
     # ---------- UI ----------
 
@@ -118,6 +120,9 @@ class QuarantineWindow(ctk.CTkToplevel):
             )
 
         self.count_label.configure(text=f"{len(self.items)} file(s)")
+
+        if self.on_change:
+                    self.on_change()
 
     def selected(self):
         selection = self.tree.selection()

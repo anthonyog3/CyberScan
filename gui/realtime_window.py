@@ -279,6 +279,7 @@ class RealTimeWindow(ctk.CTkToplevel):
             return
 
         entry["quarantined"] = True
+        self.app.refresh_home()
         self.tree.item(
             iid, values=self.row_values(entry), tags=(self.row_tag(entry),)
         )

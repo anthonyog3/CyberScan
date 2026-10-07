@@ -6,6 +6,7 @@ SETTINGS_FILE = Path("database/settings.json")
 DEFAULTS = {
     "realtime_enabled": False,
     "protected_folders": None, # None = never configured (app picks Downloads)
+    "last_audit": None,        #ADD
 }
 
 

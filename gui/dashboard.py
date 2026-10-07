@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 
 from core.scanner import scan_path
-from core.quarantine import quarantine_file
+from core.quarantine import quarantine_file, list_quarantined
 from gui.quarantine_window import QuarantineWindow
 from core.monitor import RealTimeMonitor
 from core.settings import load_settings, save_settings
@@ -30,6 +30,11 @@ POLL_MS = 100        # how often the UI thread checks the worker
 INSERT_BATCH = 500   # tree rows inserted per UI tick
 RT_POLL_MS = 500     # how often the UI drains real-time events
 RT_FEED_LIMIT = 500  # activity entries kept in memory
+STALE_DAYS = 7       # warn when the last scan is older than this
+
+ICONS = {"good": "✓", "warn": "●", "bad": "⚠"}
+TEXT_COLORS = {"good": "#5fd38d", "warn": "#f5c542", "bad": "#ff6b6b"}
+BANNER_COLORS = {"good": "#1e5a3a", "warn": "#6b5a1a", "bad": "#7a2a2a"}
 
 
 def normalize(path):
@@ -46,8 +51,8 @@ class AntivirusApp(ctk.CTk):
         super().__init__()
 
         self.title("CyberScan")
-        self.geometry("1100x780")          # CHANGE (was 1100x720)
-        self.minsize(900, 700)             # CHANGE (was 900, 620)
+        self.geometry("1100x840")          # CHANGE (was 1100x780)
+        self.minsize(900, 760)             # CHANGE (was 900, 700)
 
         self.results = []
         self.threats = {}          # normalized path -> result (HIGH / CRITICAL only)
@@ -74,23 +79,21 @@ class AntivirusApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        self.last_scan = self.load_last_scan()
         self.build_ui()
         self.init_realtime()               # ADD (right after build_ui)
 
-        
-        self.build_ui()
+        self.last_scan = self.load_last_scan()     # ADD (above self.build_ui())
 
     # ---------- UI ----------
 
     def build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
         self.build_header()
         self.build_status()
-
-        self.build_stats()
-        self.build_main()
+        self.build_tabs()
 
     def build_header(self):
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -113,9 +116,9 @@ class AntivirusApp(ctk.CTk):
         self.rt_label = self.label(frame, "", 12)
         self.rt_label.pack(side="right", padx=20)
 
-    def build_stats(self):
-        frame = ctk.CTkFrame(self, fg_color="transparent")
-        frame.grid(row=2, column=0, sticky="ew", padx=30, pady=5)
+    def build_stats(self, parent):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
         for i in range(3):
             frame.grid_columnconfigure(i, weight=1)
@@ -135,15 +138,124 @@ class AntivirusApp(ctk.CTk):
 
         return label
 
-    def build_main(self):
-        frame = ctk.CTkFrame(self, fg_color="transparent")
-        frame.grid(row=3, column=0, sticky="nsew", padx=30, pady=(10, 25))
+    def build_main(self, parent):
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame.grid(row=1, column=-0, sticky="nsew", pady=(10, 0))
 
         frame.grid_columnconfigure(1, weight=1)
         frame.grid_rowconfigure(0, weight=1)
 
         self.build_controls(frame)
         self.build_results(frame)
+
+    def build_tabs(self):
+        self.tabs = ctk.CTkTabview(
+            self, corner_radius=12, command=self.on_tab_change
+        )
+        self.tabs.grid(row=2, column=0, sticky="nsew", padx=30, pady=(5, 25))
+
+        home = self.tabs.add("Home")
+        scanner = self.tabs.add("Scanner")
+
+        for tab in (home, scanner):
+            tab.grid_columnconfigure(0, weight=1)
+
+        scanner.grid_rowconfigure(1, weight=1)
+
+        self.build_home(home)
+        self.build_stats(scanner)
+        self.build_main(scanner)
+
+        # Show the saved audit score in the Scanner tab's card too.
+        audit = self.settings.get("last_audit")
+
+        if audit:
+            self.score_stat.configure(text=f"{audit.get('score', 0)}/100")
+
+    def on_tab_change(self):
+        if self.tabs.get() == "Home":
+            self.refresh_home()
+
+    def build_home(self, parent):
+        parent.grid_rowconfigure(2, weight=1)
+
+        # Banner: the one-glance verdict.
+        self.banner = ctk.CTkFrame(parent, corner_radius=12)
+        self.banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        self.banner_title = self.label(self.banner, "", 22)
+        self.banner_title.pack(anchor="w", padx=25, pady=(16, 2))
+
+        self.banner_sub = ctk.CTkLabel(self.banner, text="")
+        self.banner_sub.pack(anchor="w", padx=25, pady=(0, 16))
+
+        # Four status cards.
+        cards = ctk.CTkFrame(parent, fg_color="transparent")
+        cards.grid(row=1, column=0, sticky="ew", pady=5)
+
+        for i in range(4):
+            cards.grid_columnconfigure(i, weight=1, uniform="cards")
+
+        _, self.home_score, self.home_score_note = self.home_card(
+            cards, "SECURITY SCORE", 0
+        )
+        rt_card, self.home_rt, self.home_rt_note = self.home_card(
+            cards, "REAL-TIME PROTECTION", 1
+        )
+        _, self.home_scan, self.home_scan_note = self.home_card(
+            cards, "LAST SCAN", 2
+        )
+        _, self.home_quar, self.home_quar_note = self.home_card(
+            cards, "QUARANTINE", 3
+        )
+
+        self.home_switch = ctk.CTkSwitch(
+            rt_card, text="Enabled", command=self.toggle_realtime_home
+        )
+        self.home_switch.pack(pady=(0, 12))
+
+        # Recommendations + quick actions.
+        bottom = ctk.CTkFrame(parent, fg_color="transparent")
+        bottom.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_rowconfigure(0, weight=1)
+
+        recs = ctk.CTkFrame(bottom, corner_radius=12)
+        recs.grid(row=0, column=0, sticky="nsew", padx=5)
+
+        self.label(recs, "RECOMMENDATIONS", 13).pack(
+            anchor="w", padx=20, pady=(16, 8)
+        )
+        self.rec_frame = ctk.CTkFrame(recs, fg_color="transparent")
+        self.rec_frame.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+        actions = ctk.CTkFrame(bottom, corner_radius=12)
+        actions.grid(row=0, column=1, sticky="ns", padx=5)
+
+        self.label(actions, "QUICK ACTIONS", 13).pack(padx=20, pady=(16, 8))
+
+        for text, command in (
+            ("Quick Scan", self.quick_scan),
+            ("Security Audit", self.security_audit),
+            ("Real-Time Protection", self.open_realtime),
+            ("Quarantine Manager", self.open_quarantine_manager),
+        ):
+            self.add_button(actions, text, command)
+
+    def home_card(self, parent, title, column):
+        card = ctk.CTkFrame(parent, corner_radius=12)
+        card.grid(row=0, column=column, sticky="nsew", padx=5)
+
+        self.label(card, title, 11).pack(pady=(12, 2))
+
+        value = self.label(card, "--", 22)
+        value.pack()
+
+        note = ctk.CTkLabel(card, text="", wraplength=190)
+        note.pack(pady=(2, 12), padx=10)
+
+        return card, value, note
+
 
     def build_controls(self, parent):
         frame = ctk.CTkFrame(parent, corner_radius=12)
@@ -491,6 +603,8 @@ class AntivirusApp(ctk.CTk):
         if self.busy:
             return
 
+        self.tabs.set("Scanner")
+
         self.results = []
         self._progress = None
         self._shown_progress = None
@@ -532,9 +646,11 @@ class AntivirusApp(ctk.CTk):
 
         if not results:
             self.empty_results()
+            self.refresh_home()
             return
 
         self.save_history(len(results), threat_count)
+        self.refresh_home()
         self.render_results(results)
 
         logger.info(
@@ -600,18 +716,23 @@ class AntivirusApp(ctk.CTk):
     # ---------- History ----------
 
     def save_history(self, scanned, threats):
+        entry = {
+            "date": datetime.now().isoformat(timespec="seconds"),
+            "files_scanned": scanned,
+            "threats": threats
+            
+        }
+        self.last_scan = entry
+
         try:
             history = (
                 json.loads(HISTORY.read_text(encoding="utf-8"))
-                if HISTORY.exists()
-                else []
+                if HISTORY .exists()
+                else[]
             )
 
-            history.append({
-                "date": datetime.now().isoformat(timespec="seconds"),
-                "files_scanned": scanned,
-                "threats": threats
-            })
+
+            history.append(entry)
 
             HISTORY.parent.mkdir(parents=True, exist_ok=True)
             HISTORY.write_text(
@@ -621,6 +742,13 @@ class AntivirusApp(ctk.CTk):
 
         except Exception as exc:
             logger.error("Could not save history: %s", exc)
+    @staticmethod
+    def load_last_scan():
+        try:
+            history = json.loads(HISTORY.read_text(encoding="utf-8"))
+            return history[-1] if history else None
+        except (OSError, json.JSONDecodeError):
+            return None
 
     # ---------- Quarantine ----------
 
@@ -672,6 +800,7 @@ class AntivirusApp(ctk.CTk):
 
             self.threats.pop(normalize(result.path), None)
             self.threats_stat.configure(text=str(len(self.threats)))
+            self.refresh_home()
 
             messagebox.showinfo("Quarantined", f"File quarantined. \n\nID: {qid}")
             logger.warning("Quarantined %s as %s", result.path, qid)
@@ -687,13 +816,15 @@ class AntivirusApp(ctk.CTk):
             window.focus()
             return
 
-        self._quarantine_window = QuarantineWindow(self)        
+        self._quarantine_window = QuarantineWindow(self, on_change=self.refresh_home)        
 
     # ---------- Security Audit ----------
 
     def security_audit(self):
         if self.busy:
             return
+
+        self.tabs.set("Scanner")
 
         self.status_text("Running security audit...")
         self.results_status.configure(text="Auditing...")
@@ -737,6 +868,14 @@ class AntivirusApp(ctk.CTk):
         self.status_text(f"Security audit complete - {score}/100")
         logger.info("Security audit complete: %d/100", score)
 
+        self.settings["last audit"] = {
+            "score": score,
+            "level": level,
+            "date": datetime.now() .isoformat(timespec="seconds")
+        }
+        save_settings(self.settings)
+        self.refresh_home()
+
     def audit_error(self, exc):
         self.status_text("Security audit failed")
         self.results_status.configure(text="Error")
@@ -758,6 +897,7 @@ class AntivirusApp(ctk.CTk):
             self.set_realtime(True, quiet=True)
 
         self.update_rt_status()
+        self.refresh_home()
         self.after(RT_POLL_MS, self._poll_realtime)
 
     def set_realtime(self, enabled, quiet=False):
@@ -779,6 +919,7 @@ class AntivirusApp(ctk.CTk):
             save_settings(self.settings)
 
         self.update_rt_status()
+        self.refresh_home()
         logger.info(
             "Real-time protection %s",
             "enabled" if self.monitor.running else "disabled"
@@ -805,6 +946,7 @@ class AntivirusApp(ctk.CTk):
             text, color = "●  Real-time protection OFF", "#f5c542"
 
         self.rt_label.configure(text=text, text_color=color)
+        self.update_home_rt()
 
     def _poll_realtime(self):
         handled = False
@@ -868,4 +1010,175 @@ class AntivirusApp(ctk.CTk):
 
     def on_close(self):
         self.monitor.stop()     # stop watching, but keep the saved on/off choice
-        self.destroy()        
+        self.destroy()    
+
+
+    # ---------- Home dashboard ----------
+
+    def refresh_home(self):
+        """Redraw the whole Home tab from current state. Safe to call anytime."""
+        audit = self.settings.get("last_audit")
+
+        if audit:
+            self.home_score.configure(text=f"{audit.get('score', 0)}/100")
+            self.home_score_note.configure(
+                text=f"{audit.get('level', '')} - {self.ago(audit.get('date'))}"
+            )
+        else:
+            self.home_score.configure(text="--")
+            self.home_score_note.configure(text="Run a Security Audit")
+
+        scan = self.last_scan
+
+        if scan:
+            self.home_scan.configure(text=self.ago(scan.get("date")))
+            self.home_scan_note.configure(
+                text=f"{scan.get('files_scanned', 0)} files, "
+                     f"{scan.get('threats', 0)} threats"
+            )
+        else:
+            self.home_scan.configure(text="Never")
+            self.home_scan_note.configure(text="Run a Quick Scan")
+
+        count = self.quarantine_count()
+        self.home_quar.configure(text=str(count))
+        self.home_quar_note.configure(
+            text="file(s) isolated" if count else "Nothing in quarantine"
+        )
+
+        self.update_home_rt()
+        self.render_recommendations()
+
+    def update_home_rt(self):
+        if self.monitor.running:
+            self.home_switch.select()
+            self.home_rt.configure(text="ON", text_color=TEXT_COLORS["good"])
+            self.home_rt_note.configure(
+                text=f"{self.rt_scanned} scanned, {self.rt_threats} threats"
+            )
+        else:
+            self.home_switch.deselect()
+            self.home_rt.configure(text="OFF", text_color=TEXT_COLORS["warn"])
+            self.home_rt_note.configure(text="New files are not scanned")
+
+    def toggle_realtime_home(self):
+        self.set_realtime(bool(self.home_switch.get()))
+
+        window = self._rt_window      # keep the pop-up's switch in sync
+
+        if window is not None and window.winfo_exists():
+            window.sync_switch()
+
+    def home_issues(self):
+        """Everything needing attention, as (severity, message) pairs."""
+        issues = []
+
+        unresolved = sum(
+            1 for e in self.rt_events
+            if e["risk"] in THREATS and not e["quarantined"]
+        )
+        active = len(self.threats) + unresolved
+
+        if active:
+            issues.append((
+                "bad",
+                f"{active} active threat(s) detected. Quarantine them to stay safe."
+            ))
+
+        if not self.monitor.running:
+            issues.append((
+                "warn",
+                "Real-time protection is off. Turn it on to scan new files automatically."
+            ))
+
+        audit = self.settings.get("last_audit")
+        score = audit.get("score", 0) if audit else None
+
+        if score is None:
+            issues.append((
+                "warn",
+                "No security audit yet. Run one to check your Windows settings."
+            ))
+        elif score < 50:
+            issues.append(("bad", f"Security score is {score}/100. Review the failed checks."))
+        elif score < 75:
+            issues.append(("warn", f"Security score is {score}/100. Review the failed checks."))
+
+        scan = self.last_scan
+
+        if scan is None:
+            issues.append(("warn", "You haven't scanned yet. Try a Quick Scan."))
+        else:
+            try:
+                age = datetime.now() - datetime.fromisoformat(scan["date"])
+
+                if age.days >= STALE_DAYS:
+                    issues.append((
+                        "warn",
+                        f"Your last scan was {age.days} days ago. Run a new scan."
+                    ))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        return issues
+
+    def render_recommendations(self):
+        issues = self.home_issues()
+        severities = {severity for severity, _ in issues}
+
+        if "bad" in severities:
+            level, title = "bad", "Action required"
+        elif "warn" in severities:
+            level, title = "warn", "Attention needed"
+        else:
+            level, title = "good", "You're protected"
+
+        if level == "good":
+            subtitle = "Your PC looks healthy."
+            issues = [(
+                "good",
+                "Everything looks good. Keep real-time protection on and scan regularly."
+            )]
+        else:
+            subtitle = f"{len(issues)} item(s) to review."
+
+        self.banner.configure(fg_color=BANNER_COLORS[level])
+        self.banner_title.configure(text=f"{ICONS[level]}  {title}")
+        self.banner_sub.configure(text=subtitle)
+
+        for widget in self.rec_frame.winfo_children():
+            widget.destroy()
+
+        for severity, text in issues:
+            ctk.CTkLabel(
+                self.rec_frame,
+                text=f"{ICONS[severity]}  {text}",
+                text_color=TEXT_COLORS[severity],
+                anchor="w",
+                justify="left",
+                wraplength=520
+            ).pack(fill="x", pady=4)
+
+    @staticmethod
+    def quarantine_count():
+        try:
+            return len(list_quarantined())
+        except Exception:
+            return 0
+
+    @staticmethod
+    def ago(iso):
+        try:
+            delta = datetime.now() - datetime.fromisoformat(iso)
+        except (TypeError, ValueError):
+            return "unknown"
+
+        seconds = int(delta.total_seconds())
+
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            return f"{seconds // 60} min ago"
+        if seconds < 86400:
+            return f"{seconds // 3600} h ago"
+        return f"{seconds // 86400} d ago"    
