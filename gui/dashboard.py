@@ -11,6 +11,9 @@ import customtkinter as ctk
 from core.scanner import scan_path
 from core.quarantine import quarantine_file
 from gui.quarantine_window import QuarantineWindow
+from core.monitor import RealTimeMonitor
+from core.settings import load_settings, save_settings
+from gui.realtime_window import RealTimeWindow
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
@@ -25,6 +28,8 @@ BAD_TAGS = THREATS | {"ERROR"}
 
 POLL_MS = 100        # how often the UI thread checks the worker
 INSERT_BATCH = 500   # tree rows inserted per UI tick
+RT_POLL_MS = 500     # how often the UI drains real-time events
+RT_FEED_LIMIT = 500  # activity entries kept in memory
 
 
 def normalize(path):
@@ -41,8 +46,8 @@ class AntivirusApp(ctk.CTk):
         super().__init__()
 
         self.title("CyberScan")
-        self.geometry("1100x720")
-        self.minsize(900, 620)
+        self.geometry("1100x780")          # CHANGE (was 1100x720)
+        self.minsize(900, 700)             # CHANGE (was 900, 620)
 
         self.results = []
         self.threats = {}          # normalized path -> result (HIGH / CRITICAL only)
@@ -58,7 +63,21 @@ class AntivirusApp(ctk.CTk):
 
         self._row_data = {}            # tree iid -> ScanResult or details string
         self._row_count = 0
+        self.settings = load_settings()
+        self.monitor = RealTimeMonitor(
+            exclude=("quarantine", "logs", "database")
+        )
+        self.rt_events = []        # activity feed, oldest first
+        self.rt_scanned = 0
+        self.rt_threats = 0
+        self._rt_window = None
 
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.build_ui()
+        self.init_realtime()               # ADD (right after build_ui)
+
+        
         self.build_ui()
 
     # ---------- UI ----------
@@ -69,6 +88,7 @@ class AntivirusApp(ctk.CTk):
 
         self.build_header()
         self.build_status()
+
         self.build_stats()
         self.build_main()
 
@@ -90,6 +110,8 @@ class AntivirusApp(ctk.CTk):
 
         self.status_label = self.label(frame, "●  System ready", 14)
         self.status_label.pack(side="left", padx=20, pady=14)
+        self.rt_label = self.label(frame, "", 12)
+        self.rt_label.pack(side="right", padx=20)
 
     def build_stats(self):
         frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -133,6 +155,7 @@ class AntivirusApp(ctk.CTk):
             ("Quick Scan", self.quick_scan),
             ("Custom Scan", self.custom_scan),
             ("Security Audit", self.security_audit),
+            ("Real-Time Protection", self.open_realtime),
         ):
             self.add_button(frame, text, command)
 
@@ -720,3 +743,129 @@ class AntivirusApp(ctk.CTk):
 
         self.result_card("ERROR", "Security audit error", str(exc))
         logger.error("Security audit failed: %s", exc)
+
+    # ---------- Real-Time Protection ----------
+
+    def init_realtime(self):
+        if self.settings["protected_folders"] is None:
+            downloads = Path.home() / "Downloads"
+            self.settings["protected_folders"] = (
+                [str(downloads)] if downloads.is_dir() else []
+            )
+            save_settings(self.settings)
+
+        if self.settings["realtime_enabled"]:
+            self.set_realtime(True, quiet=True)
+
+        self.update_rt_status()
+        self.after(RT_POLL_MS, self._poll_realtime)
+
+    def set_realtime(self, enabled, quiet=False):
+        try:
+            if enabled:
+                self.monitor.start(self.settings["protected_folders"])
+            else:
+                self.monitor.stop()
+
+        except Exception as exc:
+            logger.error("Real-time protection error: %s", exc)
+
+            if not quiet:
+                messagebox.showerror("Real-Time Protection", str(exc))
+
+        self.settings["realtime_enabled"] = self.monitor.running
+
+        if not quiet:
+            save_settings(self.settings)
+
+        self.update_rt_status()
+        logger.info(
+            "Real-time protection %s",
+            "enabled" if self.monitor.running else "disabled"
+        )
+
+    def set_folders(self, folders):
+        self.settings["protected_folders"] = folders
+        save_settings(self.settings)
+
+        if self.monitor.running:        # restart so the new list takes effect
+            self.set_realtime(False)
+
+            if folders:
+                self.set_realtime(True)
+
+    def update_rt_status(self):
+        if self.monitor.running:
+            text = (
+                f"●  Real-time protection ON  "
+                f"({self.rt_scanned} scanned, {self.rt_threats} threats)"
+            )
+            color = "#ff6b6b" if self.rt_threats else "#5fd38d"
+        else:
+            text, color = "●  Real-time protection OFF", "#f5c542"
+
+        self.rt_label.configure(text=text, text_color=color)
+
+    def _poll_realtime(self):
+        handled = False
+
+        for _ in range(100):            # cap per tick so the UI never stalls
+            try:
+                event = self.monitor.events.get_nowait()
+            except queue.Empty:
+                break
+
+            self.handle_rt_event(event)
+            handled = True
+
+        if handled:
+            self.update_rt_status()
+
+        self.after(RT_POLL_MS, self._poll_realtime)
+
+    def handle_rt_event(self, event):
+        result = event.result
+
+        if event.kind == "error":
+            risk, details = "ERROR", event.error
+        else:
+            risk = result.risk or "SAFE"
+            details = self.result_details(result)
+
+        entry = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "risk": risk,
+            "path": event.path,
+            "result": result,
+            "details": details,
+            "quarantined": False,
+        }
+
+        self.rt_scanned += 1
+        self.rt_events.append(entry)
+
+        if len(self.rt_events) > RT_FEED_LIMIT:
+            self.rt_events.pop(0)
+
+        if risk in THREATS:
+            self.rt_threats += 1
+            self.status_text(f"Real-time: threat detected - {Path(event.path).name}")
+            logger.warning("Real-time threat (%s): %s", risk, event.path)
+
+        window = self._rt_window
+
+        if window is not None and window.winfo_exists():
+            window.add_entry(entry)
+
+    def open_realtime(self):
+        window = self._rt_window
+
+        if window is not None and window.winfo_exists():
+            window.focus()
+            return
+
+        self._rt_window = RealTimeWindow(self)
+
+    def on_close(self):
+        self.monitor.stop()     # stop watching, but keep the saved on/off choice
+        self.destroy()        
