@@ -14,6 +14,7 @@ from gui.quarantine_window import QuarantineWindow
 from core.monitor import RealTimeMonitor
 from core.settings import load_settings, save_settings
 from gui.realtime_window import RealTimeWindow
+from gui.history_tab import HistoryTab
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
@@ -156,15 +157,22 @@ class AntivirusApp(ctk.CTk):
 
         home = self.tabs.add("Home")
         scanner = self.tabs.add("Scanner")
+        history = self.tabs.add("History")
 
-        for tab in (home, scanner):
+        for tab in (home, scanner, history):
             tab.grid_columnconfigure(0, weight=1)
 
         scanner.grid_rowconfigure(1, weight=1)
+        history.grid_rowconfigure(0, weight=1)
 
         self.build_home(home)
         self.build_stats(scanner)
         self.build_main(scanner)
+
+        self.history_tab = HistoryTab(
+            history, HISTORY, on_change=self.on_history_cleared
+        )
+        self.history_tab.grid(row=0, column=0, sticky="nsew")
 
         # Show the saved audit score in the Scanner tab's card too.
         audit = self.settings.get("last_audit")
@@ -173,8 +181,13 @@ class AntivirusApp(ctk.CTk):
             self.score_stat.configure(text=f"{audit.get('score', 0)}/100")
 
     def on_tab_change(self):
-        if self.tabs.get() == "Home":
+        tab = self.tabs.get()
+
+        if tab == "Home":
             self.refresh_home()
+        elif tab == "History":
+            self.history_tab.refresh()
+
 
     def build_home(self, parent):
         parent.grid_rowconfigure(2, weight=1)
@@ -749,6 +762,10 @@ class AntivirusApp(ctk.CTk):
             return history[-1] if history else None
         except (OSError, json.JSONDecodeError):
             return None
+
+    def on_history_cleared(self):
+        self.last_scan = self.load_last_scan()   #None once the file is empty
+        self.refresh_home()
 
     # ---------- Quarantine ----------
 
