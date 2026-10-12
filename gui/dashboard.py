@@ -15,6 +15,7 @@ from core.monitor import RealTimeMonitor
 from core.settings import load_settings, save_settings
 from gui.realtime_window import RealTimeWindow
 from gui.history_tab import HistoryTab
+from gui.startup_tab import StartupTab
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
@@ -158,12 +159,14 @@ class AntivirusApp(ctk.CTk):
         home = self.tabs.add("Home")
         scanner = self.tabs.add("Scanner")
         history = self.tabs.add("History")
+        startup = self.tabs.add("Startup")
 
-        for tab in (home, scanner, history):
+        for tab in (home, scanner, history, startup):
             tab.grid_columnconfigure(0, weight=1)
 
         scanner.grid_rowconfigure(1, weight=1)
         history.grid_rowconfigure(0, weight=1)
+        startup.grid_rowconfigure(0, weight=1)
 
         self.build_home(home)
         self.build_stats(scanner)
@@ -173,6 +176,8 @@ class AntivirusApp(ctk.CTk):
             history, HISTORY, on_change=self.on_history_cleared
         )
         self.history_tab.grid(row=0, column=0, sticky="nsew")
+        self.startup_tab = StartupTab(startup, self, on_change=self.refresh_home)
+        self.startup_tab.grid(row=0, column=0, sticky="nsew")
 
         # Show the saved audit score in the Scanner tab's card too.
         audit = self.settings.get("last_audit")
@@ -187,7 +192,8 @@ class AntivirusApp(ctk.CTk):
             self.refresh_home()
         elif tab == "History":
             self.history_tab.refresh()
-
+        elif tab == "Startup":
+            self.startup_tab.ensure_loaded()
 
     def build_home(self, parent):
         parent.grid_rowconfigure(2, weight=1)
@@ -1135,6 +1141,15 @@ class AntivirusApp(ctk.CTk):
                     ))
             except (KeyError, TypeError, ValueError):
                 pass
+
+        startup = getattr(self, "startup_tab", None)
+
+        if startup is not None and startup.warning_count:
+            issues.append((
+                "bad" if startup.threat_count else "warn",
+                f"{startup.warning_count} startup item(s) need review. "
+                "Open the Startup tab."
+            ))
 
         return issues
 

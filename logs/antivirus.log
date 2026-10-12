@@ -58,3 +58,12 @@
 2026-10-08 16:46:01,292 | INFO | Scan complete: 6456 files, 0 threats
 2026-10-08 16:46:10,470 | WARNING | Scan history cleared
 2026-10-08 16:46:31,707 | INFO | Scan complete: 6456 files, 0 threats
+2026-10-08 16:47:35,864 | INFO | Real-time monitor watching: ['C:\\Users\\alexo\\Downloads']
+2026-10-08 16:47:35,873 | INFO | Real-time protection enabled
+2026-10-12 09:37:37,742 | INFO | Real-time monitor watching: ['C:\\Users\\alexo\\Downloads']
+2026-10-12 09:37:37,752 | INFO | Real-time protection enabled
+2026-10-12 09:37:39,182 | INFO | Startup check: 21 items, 4 need review, 0 threats
+2026-10-12 09:38:36,709 | INFO | Real-time monitor watching: ['C:\\Users\\alexo\\Downloads']
+2026-10-12 09:38:36,717 | INFO | Real-time protection enabled
+2026-10-12 09:38:38,271 | INFO | Startup check: 20 items, 3 need review, 0 threats
+2026-10-12 09:38:42,749 | INFO | Startup check: 20 items, 3 need review, 0 threats
