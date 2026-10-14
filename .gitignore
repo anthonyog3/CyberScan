@@ -6,3 +6,10 @@ dist/
 .venv/
 __pycache__/
 *.pyc
+
+# Personal data created by the app
+database/settings.json
+database/scan_history.json
+logs/*.log
+quarantine/*
+!quarantine/.gitkeep
