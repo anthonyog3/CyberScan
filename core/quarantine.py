@@ -3,8 +3,9 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from utils.paths import data_dir
 
-QUARANTINE_DIR = Path("quarantine")
+QUARANTINE_DIR = data_dir() / "quarantine"
 METADATA_FILE = QUARANTINE_DIR / "metadata.json"
 
 

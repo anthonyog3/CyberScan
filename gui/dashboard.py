@@ -19,9 +19,10 @@ from gui.startup_tab import StartupTab
 from gui.network_tab import NetworkTab
 from security.system_audit import run_security_audit
 from utils.logger import logger
+from utils.paths import data_dir
 
 
-HISTORY = Path("database/scan_history.json")
+HISTORY = data_dir() / "database" / "scan_history.json"
 HISTORY_LIMIT = 50
 
 THREATS = frozenset({"HIGH", "CRITICAL"})
@@ -73,7 +74,7 @@ class AntivirusApp(ctk.CTk):
         self._row_count = 0
         self.settings = load_settings()
         self.monitor = RealTimeMonitor(
-            exclude=("quarantine", "logs", "database")
+            exclude=[data_dir() / name for name in ("quarantine", "logs", "database")]
         )
         self.rt_events = []        # activity feed, oldest first
         self.rt_scanned = 0

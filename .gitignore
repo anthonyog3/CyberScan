@@ -1,0 +1,8 @@
+# Packaging output
+build/
+dist/
+
+# Python
+.venv/
+__pycache__/
+*.pyc

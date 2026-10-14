@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
+from utils.paths import data_dir
 
-SETTINGS_FILE = Path("database/settings.json")
+SETTINGS_FILE = data_dir() / "database" / "settings.json"
 
 DEFAULTS = {
     "realtime_enabled": False,
