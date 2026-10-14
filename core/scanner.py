@@ -5,6 +5,7 @@ import time
 from core.hasher import sha256_file
 from core.detector import load_hash_database, static_checks
 from core.risk_engine import calculate_risk
+from utils.paths import resource_path
 
 
 @dataclass
@@ -18,9 +19,10 @@ class ScanResult:
 
 
 SKIP_EXTENSIONS = {".tmp", ".log", ".iso", ".dll"}
+HASH_DB = resource_path("database/hashes.json")
 
 
-def scan_path(target: str, hash_db_path="database/hashes.json", callback=None):
+def scan_path(target: str, hash_db_path=HASH_DB, callback=None):
     root = Path(target)
 
     if not root.exists():

@@ -1,31 +1,65 @@
 import subprocess
 import json
+def _run(*args, **kwargs):
+    """subprocess.run that never flashes a console window (needed for --noconsole)."""
+    return subprocess.run(*args, creationflags=subprocess.CREATE_NO_WINDOW, **kwargs)
 
 
 def check_firewall():
     try:
-        result = subprocess.run(
-            ["netsh", "advfirewall", "show", "allprofiles"],
-            capture_output=True,
-            text=True,
-            timeout=10
+        command = (
+            "Get-NetFirewallProfile | "
+            "Select-Object Name,Enabled | "
+            "ConvertTo-Json -Compress"
         )
 
-        output = result.stdout.lower()
+        result = _run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
 
-        if "state" in output and "on" in output:
+        if result.returncode != 0 or not result.stdout.strip():
+            return {
+                "name": "Windows Firewall",
+                "status": "Unknown",
+                "score": 0,
+                "details": "Could not retrieve firewall information."
+            }
+
+        profiles = json.loads(result.stdout.strip())
+
+        if isinstance(profiles, dict):
+            profiles = [profiles]
+
+        disabled = [
+            str(profile.get("Name", "Unknown"))
+            for profile in profiles
+            if str(profile.get("Enabled")).lower() not in ("true", "1")
+        ]
+
+        if not disabled:
             return {
                 "name": "Windows Firewall",
                 "status": "Secure",
                 "score": 20,
-                "details": "Windows Firewall appears to be enabled."
+                "details": "Windows Firewall is enabled on all profiles."
             }
 
         return {
             "name": "Windows Firewall",
             "status": "Warning",
             "score": 0,
-            "details": "One or more firewall profiles may be disabled."
+            "details": f"Windows Firewall is off for: {', '.join(disabled)}."
+        }
+
+    except json.JSONDecodeError:
+        return {
+            "name": "Windows Firewall",
+            "status": "Unknown",
+            "score": 0,
+            "details": "Could not parse firewall information."
         }
 
     except Exception as e:
@@ -46,7 +80,7 @@ def check_antivirus():
             "ConvertTo-Json -Compress"
         )
 
-        result = subprocess.run(
+        result = _run(
             [
                 "powershell",
                 "-NoProfile",
@@ -121,7 +155,7 @@ def check_windows_update():
             "ConvertTo-Json -Compress"
         )
 
-        result = subprocess.run(
+        result = _run(
             [
                 "powershell",
                 "-NoProfile",
@@ -196,7 +230,7 @@ def check_user_account_security():
             "ConvertTo-Json -Compress"
         )
 
-        result = subprocess.run(
+        result = _run(
             [
                 "powershell",
                 "-NoProfile",
@@ -259,7 +293,7 @@ def check_security_configuration():
             "ConvertTo-Json -Compress"
         )
 
-        result = subprocess.run(
+        result = _run(
             [
                 "powershell",
                 "-NoProfile",

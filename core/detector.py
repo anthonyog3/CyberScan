@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 
+from utils.paths import resource_path
+
 DOUBLE_EXTENSIONS = {
     ".pdf.exe", ".doc.exe", ".docx.exe", ".xls.exe", ".xlsx.exe",
     ".jpg.exe", ".png.exe", ".txt.exe", ".zip.exe"
@@ -10,7 +12,7 @@ SUSPICIOUS_EXECUTABLE_EXTENSIONS = {
     ".exe", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi"
 }
 
-def load_hash_database(path: str = "database/hashes.json") -> set[str]:
+def load_hash_database(path=resource_path("database/hashes.json")) -> set[str]:
     try:
         with open(path, "r", encoding="utf-8") as file:
             data = json.load(file)
