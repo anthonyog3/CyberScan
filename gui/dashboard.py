@@ -16,6 +16,7 @@ from core.settings import load_settings, save_settings
 from gui.realtime_window import RealTimeWindow
 from gui.history_tab import HistoryTab
 from gui.startup_tab import StartupTab
+from gui.network_tab import NetworkTab
 from security.system_audit import run_security_audit
 from utils.logger import logger
 
@@ -160,13 +161,15 @@ class AntivirusApp(ctk.CTk):
         scanner = self.tabs.add("Scanner")
         history = self.tabs.add("History")
         startup = self.tabs.add("Startup")
+        network = self.tabs.add("Network")
 
-        for tab in (home, scanner, history, startup):
+        for tab in (home, scanner, history, startup, network):
             tab.grid_columnconfigure(0, weight=1)
 
         scanner.grid_rowconfigure(1, weight=1)
         history.grid_rowconfigure(0, weight=1)
         startup.grid_rowconfigure(0, weight=1)
+        network.grid_rowconfigure(0, weight=1)
 
         self.build_home(home)
         self.build_stats(scanner)
@@ -178,6 +181,8 @@ class AntivirusApp(ctk.CTk):
         self.history_tab.grid(row=0, column=0, sticky="nsew")
         self.startup_tab = StartupTab(startup, self, on_change=self.refresh_home)
         self.startup_tab.grid(row=0, column=0, sticky="nsew")
+        self.network_tab = NetworkTab(network, self, on_change=self.refresh_home)
+        self.network_tab.grid(row=0, column=0, sticky="nsew")
 
         # Show the saved audit score in the Scanner tab's card too.
         audit = self.settings.get("last_audit")
@@ -194,6 +199,8 @@ class AntivirusApp(ctk.CTk):
             self.history_tab.refresh()
         elif tab == "Startup":
             self.startup_tab.ensure_loaded()
+        elif tab == "Network":
+            self.network_tab.ensure_loaded()
 
     def build_home(self, parent):
         parent.grid_rowconfigure(2, weight=1)
@@ -1149,6 +1156,15 @@ class AntivirusApp(ctk.CTk):
                 "bad" if startup.threat_count else "warn",
                 f"{startup.warning_count} startup item(s) need review. "
                 "Open the Startup tab."
+            ))
+
+        network = getattr(self, "network_tab", None)
+
+        if network is not None and network.warning_count:
+            issues.append((
+                "bad" if network.threat_count else "warn",
+                f"{network.warning_count} network connection(s) need review."
+                "Open the Network tab."
             ))
 
         return issues
